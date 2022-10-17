@@ -15,6 +15,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -22,12 +24,12 @@ import (
 
 	javagen "github.com/pulumi/pulumi-java/pkg/codegen/java"
 
-	"github.com/pulumi/pulumi/pkg/v3/codegen/dotnet"
 	gogen "github.com/pulumi/pulumi/pkg/v3/codegen/go"
 	"github.com/pulumi/pulumi/pkg/v3/codegen/nodejs"
 	"github.com/pulumi/pulumi/pkg/v3/codegen/python"
 	"github.com/pulumi/pulumi/pkg/v3/codegen/schema"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
 )
 
 func newGenSdkCommand() *cobra.Command {
@@ -67,43 +69,93 @@ func newGenSdkCommand() *cobra.Command {
 }
 
 func genSDK(language, out string, pkg *schema.Package) error {
-	var f func(string, *schema.Package, map[string][]byte) (map[string][]byte, error)
+	// Translate well known languages to runtimes
 	switch language {
-	case "csharp", "c#", "dotnet":
-		f = dotnet.GeneratePackage
-		language = "dotnet"
-	case "go":
-		f = func(s string, p *schema.Package, m map[string][]byte) (map[string][]byte, error) {
-			return gogen.GeneratePackage(s, pkg)
-		}
-	case "typescript", "nodejs":
-		f = nodejs.GeneratePackage
-		language = "nodejs"
-	case "python": // nolint: goconst
-		f = python.GeneratePackage
-	case "java":
-		f = javagen.GeneratePackage
+	case "csharp", "c#":
+		language = "dotnet" // nolint: goconst
 	}
 
-	m, err := f("pulumi", pkg, nil)
+	var f func(string, *schema.Package, map[string][]byte) error
+
+	writeWrapper := func(
+		f func(string, *schema.Package, map[string][]byte) (map[string][]byte, error),
+	) func(string, *schema.Package, map[string][]byte) error {
+		return func(directory string, p *schema.Package, extraFiles map[string][]byte) error {
+			m, err := f("pulumi", p, extraFiles)
+			if err != nil {
+				return err
+			}
+
+			err = os.RemoveAll(directory)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			for k, v := range m {
+				path := filepath.Join(directory, k)
+				err := os.MkdirAll(filepath.Dir(path), 0700)
+				if err != nil {
+					return err
+				}
+				err = os.WriteFile(path, v, 0600)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
+	switch language {
+	case "go":
+		f = writeWrapper(func(tool string, p *schema.Package, m map[string][]byte) (map[string][]byte, error) {
+			return gogen.GeneratePackage(tool, pkg)
+		})
+	case "typescript", "nodejs":
+		f = writeWrapper(nodejs.GeneratePackage)
+		language = "nodejs"
+	case "python": // nolint: goconst
+		f = writeWrapper(python.GeneratePackage)
+	case "java":
+		f = writeWrapper(javagen.GeneratePackage)
+	default:
+		f = func(directory string, pkg *schema.Package, extraFiles map[string][]byte) error {
+			host, err := newPluginHost()
+			if err != nil {
+				return fmt.Errorf("could not create plugin host: %w", err)
+			}
+			defer contract.IgnoreClose(host)
+
+			languagePlugin, err := host.LanguageRuntime(language)
+			if err != nil {
+				return err
+			}
+
+			jsonBytes, err := pkg.MarshalJSON()
+			if err != nil {
+				return err
+			}
+
+			ctx, cancel := context.WithCancel(context.TODO())
+			// Shut the server down when done
+			defer cancel()
+			loaderAddress, err := schema.NewGrpcLoaderServer(ctx, host)
+			if err != nil {
+				return err
+			}
+
+			err = languagePlugin.GeneratePackage(directory, loaderAddress, jsonBytes, extraFiles)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		}
+	}
+
+	root := filepath.Join(out, language)
+	err := f(root, pkg, nil)
 	if err != nil {
 		return err
-	}
-	root := filepath.Join(out, language)
-	err = os.RemoveAll(root)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	for k, v := range m {
-		path := filepath.Join(root, k)
-		err := os.MkdirAll(filepath.Dir(path), 0700)
-		if err != nil {
-			return err
-		}
-		err = os.WriteFile(path, v, 0600)
-		if err != nil {
-			return err
-		}
 	}
 	return nil
 }

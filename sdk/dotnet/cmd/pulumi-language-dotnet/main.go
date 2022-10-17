@@ -17,28 +17,37 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/segmentio/encoding/json"
+
 	"github.com/blang/semver"
 	pbempty "github.com/golang/protobuf/ptypes/empty"
 	"github.com/pkg/errors"
+	dotnetgen "github.com/pulumi/pulumi/pkg/v3/codegen/dotnet"
+	hclsyntax "github.com/pulumi/pulumi/pkg/v3/codegen/hcl2/syntax"
+	"github.com/pulumi/pulumi/pkg/v3/codegen/pcl"
+	"github.com/pulumi/pulumi/pkg/v3/codegen/schema"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/encoding"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/executable"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/rpcutil"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/version"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
+	codegenrpc "github.com/pulumi/pulumi/sdk/v3/proto/go/codegen"
 	"google.golang.org/grpc"
 )
 
@@ -804,4 +813,97 @@ func (host *dotnetLanguageHost) GetProgramDependencies(
 	return &pulumirpc.GetProgramDependenciesResponse{
 		Dependencies: packages,
 	}, nil
+}
+
+func (host *dotnetLanguageHost) GenerateProject(
+	ctx context.Context, req *pulumirpc.GenerateProjectRequest) (*pulumirpc.GenerateProjectResponse, error) {
+	// Make a connection to the loader
+	conn, err := grpc.Dial(
+		req.LoaderAddress,
+		grpc.WithInsecure(),
+		rpcutil.GrpcChannelOptions(),
+	)
+	if err != nil {
+		return nil, errors.Wrapf(err, "language host could not make connection to loader")
+	}
+	loaderClient := codegenrpc.NewLoaderClient(conn)
+	loader := schema.NewGrpcLoader(loaderClient)
+	parser := hclsyntax.NewParser()
+	for file, source := range req.Source {
+		if err := parser.ParseFile(strings.NewReader(source), file); err != nil {
+			return nil, err
+		}
+		if parser.Diagnostics.HasErrors() {
+			return nil, parser.Diagnostics
+		}
+	}
+	bindOpts := []pcl.BindOption{
+		pcl.SkipResourceTypechecking,
+		pcl.AllowMissingProperties,
+		pcl.AllowMissingVariables,
+	}
+	bindOpts = append(bindOpts, pcl.Loader(loader))
+	program, pdiags, err := pcl.BindProgram(parser.Files, bindOpts...)
+	if err != nil {
+		return nil, err
+	}
+	if pdiags.HasErrors() {
+		return nil, pdiags
+	}
+
+	var project workspace.Project
+	err = encoding.JSON.Unmarshal([]byte(req.Project), &project)
+	if err != nil {
+		return nil, err
+	}
+
+	err = dotnetgen.GenerateProject(req.Directory, project, program, req.SourceOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pulumirpc.GenerateProjectResponse{}, nil
+}
+
+func (host *dotnetLanguageHost) GeneratePackage(
+	ctx context.Context, req *pulumirpc.GeneratePackageRequest) (*pulumirpc.GeneratePackageResponse, error) {
+
+	var spec schema.PackageSpec
+	if _, err := json.Parse(req.Schema, &spec, json.ZeroCopy); err != nil {
+		return nil, err
+	}
+
+	// Make a connection to the loader
+	conn, err := grpc.Dial(
+		req.LoaderAddress,
+		grpc.WithInsecure(),
+		rpcutil.GrpcChannelOptions(),
+	)
+	if err != nil {
+		return nil, errors.Wrapf(err, "language host could not make connection to loader")
+	}
+	loaderClient := codegenrpc.NewLoaderClient(conn)
+	loader := schema.NewGrpcLoader(loaderClient)
+	pkg, diags, err := schema.BindSpec(spec, loader)
+	if err != nil {
+		return nil, err
+	}
+	if diags.HasErrors() {
+		return nil, diags
+	}
+
+	files, err := dotnetgen.GeneratePackage("pulumi", pkg, req.ExtraFiles)
+	if err != nil {
+		return nil, err
+	}
+
+	for filename, data := range files {
+		outPath := path.Join(req.Directory, filename)
+		err := ioutil.WriteFile(outPath, data, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("could not write output file %s: %w", filename, err)
+		}
+	}
+
+	return &pulumirpc.GeneratePackageResponse{}, nil
 }
