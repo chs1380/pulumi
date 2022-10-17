@@ -43,6 +43,28 @@ function deserialize_pulumirpc_AboutResponse(buffer_arg) {
   return pulumi_language_pb.AboutResponse.deserializeBinary(new Uint8Array(buffer_arg));
 }
 
+function serialize_pulumirpc_GenerateProjectRequest(arg) {
+  if (!(arg instanceof pulumi_language_pb.GenerateProjectRequest)) {
+    throw new Error('Expected argument of type pulumirpc.GenerateProjectRequest');
+  }
+  return Buffer.from(arg.serializeBinary());
+}
+
+function deserialize_pulumirpc_GenerateProjectRequest(buffer_arg) {
+  return pulumi_language_pb.GenerateProjectRequest.deserializeBinary(new Uint8Array(buffer_arg));
+}
+
+function serialize_pulumirpc_GenerateProjectResponse(arg) {
+  if (!(arg instanceof pulumi_language_pb.GenerateProjectResponse)) {
+    throw new Error('Expected argument of type pulumirpc.GenerateProjectResponse');
+  }
+  return Buffer.from(arg.serializeBinary());
+}
+
+function deserialize_pulumirpc_GenerateProjectResponse(buffer_arg) {
+  return pulumi_language_pb.GenerateProjectResponse.deserializeBinary(new Uint8Array(buffer_arg));
+}
+
 function serialize_pulumirpc_GetProgramDependenciesRequest(arg) {
   if (!(arg instanceof pulumi_language_pb.GetProgramDependenciesRequest)) {
     throw new Error('Expected argument of type pulumirpc.GetProgramDependenciesRequest');
@@ -217,6 +239,18 @@ getProgramDependencies: {
     requestDeserialize: deserialize_pulumirpc_GetProgramDependenciesRequest,
     responseSerialize: serialize_pulumirpc_GetProgramDependenciesResponse,
     responseDeserialize: deserialize_pulumirpc_GetProgramDependenciesResponse,
+  },
+  // GenerateProject generates a given PCL program into a project for the given runtime.
+generateProject: {
+    path: '/pulumirpc.LanguageRuntime/GenerateProject',
+    requestStream: false,
+    responseStream: false,
+    requestType: pulumi_language_pb.GenerateProjectRequest,
+    responseType: pulumi_language_pb.GenerateProjectResponse,
+    requestSerialize: serialize_pulumirpc_GenerateProjectRequest,
+    requestDeserialize: deserialize_pulumirpc_GenerateProjectRequest,
+    responseSerialize: serialize_pulumirpc_GenerateProjectResponse,
+    responseDeserialize: deserialize_pulumirpc_GenerateProjectResponse,
   },
 };
 

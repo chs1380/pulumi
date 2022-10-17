@@ -51,6 +51,8 @@ import (
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 	"github.com/pulumi/pulumi/sdk/v3/python"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -951,4 +953,9 @@ func (host *pythonLanguageHost) GetProgramDependencies(
 	return &pulumirpc.GetProgramDependenciesResponse{
 		Dependencies: dependencies,
 	}, nil
+}
+
+func (host *pythonLanguageHost) GenerateProject(
+	ctx context.Context, req *pulumirpc.GenerateProjectRequest) (*pulumirpc.GenerateProjectResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GenerateProject not implemented")
 }
