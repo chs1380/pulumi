@@ -20,6 +20,8 @@ import * as utils from "../utils";
 import { getAllResources, Input, Inputs, Output, output } from "../output";
 import { ResolvedResource } from "../queryable";
 import {
+    Alias,
+    allAliases,
     ComponentResource,
     ComponentResourceOptions,
     createUrn,
@@ -53,6 +55,7 @@ import {
     getStack,
     isDryRun,
     isLegacyApplyEnabled,
+    monitorSupportsAliasSpecs,
     rpcKeepAlive,
     serialize,
     terminateRpcs,
@@ -60,6 +63,7 @@ import {
 
 const gstruct = require("google-protobuf/google/protobuf/struct_pb.js");
 const resproto = require("../proto/resource_pb.js");
+const aliasproto = require("../proto/alias_pb.js");
 
 interface ResourceResolverOperation {
     // A resolver for a resource's URN.
@@ -84,9 +88,11 @@ interface ResourceResolverOperation {
     // all be URNs of custom resources, not component resources.
     propertyToDirectDependencyURNs: Map<string, Set<URN>>;
     // A list of aliases applied to this resource.
-    aliases: URN[];
+    aliases: (Alias | URN)[];
     // An ID to import, if any.
     import: ID | undefined;
+    // Any important feature support from the monitor.
+    monitorSupports: Map<string, boolean>;
 }
 
 /**
@@ -273,6 +279,28 @@ export function readResource(res: Resource, parent: Resource | undefined, t: str
     }), label);
 }
 
+function mapAliasesForRequest(aliases: (string | Alias)[] | undefined) {
+    if (aliases === undefined) {
+        return [];
+    }
+
+    return aliases.map(a => {
+        const newAlias = new aliasproto.Alias();
+        if (typeof a === "string") {
+            newAlias.setUrn(a);
+        } else {
+            const newAliasSpec = new aliasproto.Alias.Spec();
+            newAliasSpec.setName(a.name);
+            newAliasSpec.setType(a.type);
+            newAliasSpec.setStack(a.stack);
+            newAliasSpec.setProject(a.project);
+            newAliasSpec.setParenturn(a.parent);
+            newAlias.setSpec(newAliasSpec);
+        }
+        return newAlias;
+    });
+}
+
 /**
  * registerResource registers a new resource object with a given type t and name.  It returns the auto-generated
  * URN and the ID that will resolve after the deployment has completed.  All properties will be initialized to property
@@ -284,7 +312,7 @@ export function registerResource(res: Resource, parent: Resource | undefined, t:
     log.debug(`Registering resource: t=${t}, name=${name}, custom=${custom}, remote=${remote}`);
 
     const monitor = getMonitor();
-    const resopAsync = prepareResource(label, res, parent, custom, remote, props, opts);
+    const resopAsync = prepareResource(label, res, parent, custom, remote, props, opts, t, name);
 
     // In order to present a useful stack trace if an error does occur, we preallocate potential
     // errors here. V8 captures a stack trace at the moment an Error is created and this stack
@@ -311,7 +339,11 @@ export function registerResource(res: Resource, parent: Resource | undefined, t:
         req.setAcceptsecrets(true);
         req.setAcceptresources(!utils.disableResourceReferences);
         req.setAdditionalsecretoutputsList((<any>opts).additionalSecretOutputs || []);
-        req.setAliasurnsList(resop.aliases);
+        if (resop.monitorSupports.get("aliasSpecs")) {
+            req.setAliasesList(mapAliasesForRequest(resop.aliases));
+        } else {
+            req.setAliasurnsList(resop.aliases);
+        }
         req.setImportid(resop.import || "");
         req.setSupportspartialvalues(true);
         req.setRemote(remote);
@@ -424,8 +456,11 @@ export function registerResource(res: Resource, parent: Resource | undefined, t:
  * properties.
  */
 async function prepareResource(label: string, res: Resource, parent: Resource | undefined, custom: boolean, remote: boolean,
-                               props: Inputs, opts: ResourceOptions): Promise<ResourceResolverOperation> {
-
+    props: Inputs, opts: ResourceOptions, type: string, name: string): Promise<ResourceResolverOperation>;
+async function prepareResource(label: string, res: Resource, parent: Resource | undefined, custom: boolean, remote: boolean,
+    props: Inputs, opts: ResourceOptions): Promise<ResourceResolverOperation>;
+async function prepareResource(label: string, res: Resource, parent: Resource | undefined, custom: boolean, remote: boolean,
+                               props: Inputs, opts: ResourceOptions, type?: string, name?: string): Promise<ResourceResolverOperation> {
     // add an entry to the rpc queue while we prepare the request.
     // automation api inline programs that don't have stack exports can exit quickly. If we don't do this,
     // sometimes they will exit right after `prepareResource` is called as a part of register resource, but before the
@@ -581,12 +616,20 @@ async function prepareResource(label: string, res: Resource, parent: Resource | 
             propertyToDirectDependencyURNs.set(propertyName, urns);
         }
 
+        const supportsAliasSpecs = await monitorSupportsAliasSpecs();
+        const monitorSupports = new Map();
+        monitorSupports.set("aliasSpecs", supportsAliasSpecs);
+        let computedAliases = opts.aliases;
+        if (!supportsAliasSpecs && parent) {
+            computedAliases = await allAliases(opts.aliases || [], name!, type!, parent, parent.__name!);
+        }
+
         // Wait for all aliases. Note that we use `res.__aliases` instead of `opts.aliases` as the former has been processed
         // in the Resource constructor prior to calling `registerResource` - both adding new inherited aliases and
         // simplifying aliases down to URNs.
         const aliases = [];
-        const uniqueAliases = new Set<string>();
-        for (const alias of (res.__aliases || [])) {
+        const uniqueAliases = new Set<Alias | URN>();
+        for (const alias of (computedAliases || [])) {
             const aliasVal = await output(alias).promise();
             if (!uniqueAliases.has(aliasVal)) {
                 uniqueAliases.add(aliasVal);
@@ -606,6 +649,7 @@ async function prepareResource(label: string, res: Resource, parent: Resource | 
             propertyToDirectDependencyURNs: propertyToDirectDependencyURNs,
             aliases: aliases,
             import: importID,
+            monitorSupports,
         };
 
     } finally {
