@@ -342,3 +342,20 @@ func (h *langhost) GetProgramDependencies(info ProgInfo, transitiveDependencies 
 	logging.V(7).Infof("%s success: #versions=%d", prefix, len(results))
 	return results, nil
 }
+
+func (h *langhost) GenerateProject(directory string, project string, program string) error {
+	logging.V(7).Infof("langhost[%v].GenerateProject() executing", h.runtime)
+	_, err := h.client.GenerateProject(h.ctx.Request(), &pulumirpc.GenerateProjectRequest{
+		Directory: directory,
+		Project:   project,
+		Program:   program,
+	})
+	if err != nil {
+		rpcError := rpcerror.Convert(err)
+		logging.V(7).Infof("langhost[%v].GenerateProject() failed: err=%v", h.runtime, rpcError)
+		return rpcError
+	}
+
+	logging.V(7).Infof("langhost[%v].GenerateProject() success", h.runtime)
+	return nil
+}

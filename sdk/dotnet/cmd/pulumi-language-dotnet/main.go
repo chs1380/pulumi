@@ -32,12 +32,20 @@ import (
 	"github.com/blang/semver"
 	pbempty "github.com/golang/protobuf/ptypes/empty"
 	"github.com/pkg/errors"
+	dotnetgen "github.com/pulumi/pulumi/pkg/v3/codegen/dotnet"
+	hclsyntax "github.com/pulumi/pulumi/pkg/v3/codegen/hcl2/syntax"
+	"github.com/pulumi/pulumi/pkg/v3/codegen/pcl"
+	"github.com/pulumi/pulumi/pkg/v3/codegen/schema"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/encoding"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/executable"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/rpcutil"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/version"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 	"google.golang.org/grpc"
 )
@@ -804,4 +812,56 @@ func (host *dotnetLanguageHost) GetProgramDependencies(
 	return &pulumirpc.GetProgramDependenciesResponse{
 		Dependencies: packages,
 	}, nil
+}
+
+func (host *dotnetLanguageHost) GenerateProject(
+	ctx context.Context, req *pulumirpc.GenerateProjectRequest) (*pulumirpc.GenerateProjectResponse, error) {
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	sink := diag.DefaultSink(os.Stderr, os.Stderr, diag.FormatOptions{
+		Color: cmdutil.GetGlobalColorization(),
+	})
+	pluginCtx, err := plugin.NewContext(sink, sink, nil, nil, cwd, nil, true, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer contract.IgnoreClose(pluginCtx)
+
+	loader := schema.NewPluginLoader(pluginCtx.Host)
+	parser := hclsyntax.NewParser()
+	if err := parser.ParseFile(strings.NewReader(req.Program), "program.pp"); err != nil {
+		return nil, err
+	}
+	if parser.Diagnostics.HasErrors() {
+		return nil, parser.Diagnostics
+	}
+	bindOpts := []pcl.BindOption{
+		pcl.SkipResourceTypechecking,
+		pcl.AllowMissingProperties,
+		pcl.AllowMissingVariables,
+	}
+	bindOpts = append(bindOpts, pcl.Loader(loader))
+	program, pdiags, err := pcl.BindProgram(parser.Files, bindOpts...)
+	if err != nil {
+		return nil, err
+	}
+	if pdiags.HasErrors() {
+		return nil, pdiags
+	}
+
+	var project workspace.Project
+	err = encoding.JSON.Unmarshal([]byte(req.Project), &project)
+	if err != nil {
+		return nil, err
+	}
+
+	err = dotnetgen.GenerateProject(req.Directory, project, program)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pulumirpc.GenerateProjectResponse{}, nil
 }

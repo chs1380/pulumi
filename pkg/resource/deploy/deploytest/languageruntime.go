@@ -74,6 +74,10 @@ func (p *languageRuntime) About() (plugin.AboutInfo, error) {
 	return plugin.AboutInfo{}, nil
 }
 
+func (p *languageRuntime) GenerateProject(directory string, project string, program string) error {
+	return nil
+}
+
 func (p *languageRuntime) GetProgramDependencies(
 	info plugin.ProgInfo, transitiveDependencies bool) ([]plugin.DependencyInfo, error) {
 	return nil, nil

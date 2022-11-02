@@ -24,7 +24,6 @@ import (
 
 	javagen "github.com/pulumi/pulumi-java/pkg/codegen/java"
 	yamlgen "github.com/pulumi/pulumi-yaml/pkg/pulumiyaml/codegen"
-	"github.com/pulumi/pulumi/pkg/v3/codegen/dotnet"
 	gogen "github.com/pulumi/pulumi/pkg/v3/codegen/go"
 	"github.com/pulumi/pulumi/pkg/v3/codegen/nodejs"
 	"github.com/pulumi/pulumi/pkg/v3/codegen/pcl"
@@ -32,6 +31,7 @@ import (
 	"github.com/pulumi/pulumi/pkg/v3/codegen/schema"
 	"github.com/pulumi/pulumi/pkg/v3/engine"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/encoding"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
@@ -82,12 +82,7 @@ func newConvertCmd() *cobra.Command {
 }
 
 // runConvert converts a Pulumi program from YAML into PCL without generating a full pcl.Program
-func runConvertPcl(cwd string, outDir string) result.Result {
-	host, err := newPluginHost()
-	if err != nil {
-		return result.FromError(fmt.Errorf("could not create plugin host: %w", err))
-	}
-	defer contract.IgnoreClose(host)
+func runConvertPcl(host plugin.Host, cwd string, outDir string) result.Result {
 	loader := schema.NewPluginLoader(host)
 	_, template, diags, err := yamlgen.LoadTemplate(cwd)
 	if err != nil {
@@ -120,10 +115,20 @@ func runConvertPcl(cwd string, outDir string) result.Result {
 }
 
 func runConvert(cwd string, language string, outDir string, generateOnly bool) result.Result {
-	var projectGenerator projectGeneratorFunc
+	host, err := newPluginHost()
+	if err != nil {
+		return result.FromError(fmt.Errorf("could not create plugin host: %w", err))
+	}
+	defer contract.IgnoreClose(host)
+
+	// Translate well known languages to runtimes
 	switch language {
 	case "csharp", "c#":
-		projectGenerator = dotnet.GenerateProject
+		language = "dotnet" // nolint: goconst
+	}
+
+	var projectGenerator projectGeneratorFunc
+	switch language {
 	case "go":
 		projectGenerator = gogen.GenerateProject
 	case "typescript":
@@ -138,13 +143,50 @@ func runConvert(cwd string, language string, outDir string, generateOnly bool) r
 		if cmdutil.IsTruthy(os.Getenv("PULUMI_DEV")) {
 			// since we don't need Eject to get the full program,
 			// we can just convert the YAML directly to PCL
-			return runConvertPcl(cwd, outDir)
+			return runConvertPcl(host, cwd, outDir)
 		}
-
-		fallthrough
-
-	default:
 		return result.Errorf("cannot generate programs for %q language", language)
+	default:
+		projectGenerator = func(directory string, project workspace.Project, program *pcl.Program) error {
+			// TODO: There's probably a way to go from pcl.Program to string but for now I'm just half
+			// converting again, once everything is moved over we'll just skip making a pcl.Program here
+			// completely anyway.
+			loader := schema.NewPluginLoader(host)
+			_, template, diags, err := yamlgen.LoadTemplate(cwd)
+			if err != nil {
+				return err
+			}
+
+			if diags.HasErrors() {
+				return diags
+			}
+
+			programText, diags, err := yamlgen.ConvertTemplateIL(template, loader)
+			if err != nil {
+				return err
+			}
+			if diags.HasErrors() {
+				return diags
+			}
+
+			languagePlugin, err := host.LanguageRuntime(language)
+			if err != nil {
+				return err
+			}
+
+			projectBytes, err := encoding.JSON.Marshal(project)
+			if err != nil {
+				return err
+			}
+			projectJSON := string(projectBytes)
+
+			err = languagePlugin.GenerateProject(directory, projectJSON, programText)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		}
 	}
 
 	if outDir != "." {
@@ -154,11 +196,6 @@ func runConvert(cwd string, language string, outDir string, generateOnly bool) r
 		}
 	}
 
-	host, err := newPluginHost()
-	if err != nil {
-		return result.FromError(fmt.Errorf("could not create plugin host: %w", err))
-	}
-	defer contract.IgnoreClose(host)
 	loader := schema.NewPluginLoader(host)
 	proj, pclProgram, err := yamlgen.Eject(cwd, loader)
 	if err != nil {
@@ -188,7 +225,7 @@ func runConvert(cwd string, language string, outDir string, generateOnly bool) r
 		return result.FromError(err)
 	}
 
-	// defer ctx.Close()
+	defer ctx.Close()
 
 	if !generateOnly {
 		if err := installDependencies(ctx, &proj.Runtime, pwd); err != nil {
