@@ -29,7 +29,6 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/result"
 	"github.com/spf13/cobra"
 	survey "gopkg.in/AlecAivazis/survey.v1"
@@ -177,7 +176,10 @@ func totalStateEdit(ctx context.Context, s backend.Stack, showPrompt bool, opts 
 
 	// If the stack is already broken, don't bother verifying the integrity here.
 	if !stackIsAlreadyHosed {
-		contract.AssertNoErrorf(snap.VerifyIntegrity(), "state edit produced an invalid snapshot")
+		err = snap.VerifyIntegrity()
+	}
+	if err != nil {
+		return result.FromError(fmt.Errorf("state edit produced an invalid snapshot: %w", err))
 	}
 
 	sdep, err := stack.SerializeDeployment(snap, snap.SecretsManager, false /* showSecrets */)

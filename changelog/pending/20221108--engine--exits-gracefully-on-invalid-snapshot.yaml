@@ -1,0 +1,4 @@
+changes:
+- type: fix
+  scope: engine
+  description: Exits gracefully on invalid snapshot
